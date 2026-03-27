@@ -1,0 +1,10 @@
+[Unit]
+Description=Run bqclock every minute.
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+Unit=bqclock.timer
+
+[Install]
+WantedBy=timers.target

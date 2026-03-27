@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""
+BeQuiet MediaDock clock sync — reverse engineered from USB captures.
+
+Sends a MediaDock_SetDateTime packet to the keyboard over HID.
+Requires: pip install hid
+Run as root or with appropriate udev rules for HID access.
+"""
+
+import hid
+import struct
+import time
+import datetime
+
+# ── Protocol constants ─────────────────────────────────────────────────────────
+PACKET_SIZE     = 64
+FEATURE_MEDIA_DOCK = 33   # T.MEDIA_DOCK_MODULE
+CMD_SET_DATETIME   = 5    # Mt.SetDateTime
+STATUS_SUCCESS     = 0
+
+# Byte offsets (Bn enum, PACKET_SIZE <= 254)
+OFF_PAYLOAD_LEN = 0
+OFF_SEQUENCE_ID = 1
+OFF_SESSION_ID  = 2
+OFF_STATUS      = 3
+OFF_REQUEST_ID  = 4
+OFF_FEATURE_ID  = 5
+OFF_COMMAND_ID  = 6
+OFF_DATA        = 7
+OFF_CHECKSUM    = PACKET_SIZE - 2  # bytes 62–63
+
+
+def crc16(data: bytes) -> int:
+    """CRC-16 as implemented in the BeQuiet web app (Um function)."""
+    t = 0xFFFF
+    for byte in data:
+        t ^= byte
+        for _ in range(8):
+            e = t & 1
+            t >>= 1
+            if e:
+                t ^= 40961
+    return t
+
+
+def build_packet(session_id: int, request_id: int,
+                 feature_id: int, command_id: int,
+                 payload: bytes = b"") -> bytes:
+    """Build a 64-byte HID packet with CRC."""
+    pkt = bytearray(PACKET_SIZE)
+    pkt[OFF_PAYLOAD_LEN] = (len(payload) + 6) & 0xFF
+    pkt[OFF_SEQUENCE_ID] = 0
+    pkt[OFF_SESSION_ID]  = session_id & 0xFF
+    pkt[OFF_STATUS]      = STATUS_SUCCESS
+    pkt[OFF_REQUEST_ID]  = request_id & 0xFF
+    pkt[OFF_FEATURE_ID]  = feature_id
+    pkt[OFF_COMMAND_ID]  = command_id
+    if payload:
+        pkt[OFF_DATA:OFF_DATA + len(payload)] = payload
+    crc = crc16(bytes(pkt[:OFF_CHECKSUM]))
+    pkt[OFF_CHECKSUM]     = crc & 0xFF
+    pkt[OFF_CHECKSUM + 1] = (crc >> 8) & 0xFF
+    return bytes(pkt)
+
+
+def local_unix_timestamp() -> int:
+    """
+    Local-time Unix timestamp as used by the BeQuiet app:
+      floor(Date.now()/1000 - timezoneOffsetSeconds)
+    This is NOT standard UTC Unix time — it's shifted to local wall clock.
+    """
+    now = datetime.datetime.now()
+    utc_ts = int(time.time())
+    offset_seconds = int(now.utcoffset().total_seconds()) if now.utcoffset() else \
+                     -time.timezone  # fallback: use system timezone offset
+    return utc_ts + offset_seconds
+
+
+def find_device(vendor_id: int = None, product_id: int = None):
+    """Find the BeQuiet MediaDock HID device."""
+    for dev in hid.enumerate():
+        if vendor_id and dev["vendor_id"] != vendor_id:
+            continue
+        if product_id and dev["product_id"] != product_id:
+            continue
+        # Usage page 0xFF00 = vendor-defined HID, typical for keyboards with HID++ style protocol
+        if dev.get("usage_page", 0) == 0xFF00:
+            return dev
+    return None
+
+
+def sync_clock(device_path: bytes, session_id: int = 0x17,
+               verbose: bool = True) -> None:
+    """Open the device and send a single SetDateTime packet."""
+    ts = local_unix_timestamp()
+    payload = struct.pack("<I", ts)  # 4-byte little-endian uint32
+
+    # request_id can be any non-zero byte; 1 is fine for a one-shot
+    pkt = build_packet(session_id, request_id=1,
+                       feature_id=FEATURE_MEDIA_DOCK,
+                       command_id=CMD_SET_DATETIME,
+                       payload=payload)
+
+    if verbose:
+        local_time = datetime.datetime.fromtimestamp(ts - (-time.timezone))
+        print(f"Sending SetDateTime: local ts={ts} ({local_time})")
+        print(f"Packet: {pkt.hex()}")
+
+        dev = hid.device()
+        dev.open_path(device_path)
+        try:
+        # sendReport(reportId=0, data) — prepend report ID 0
+            dev.write(bytes([0x00]) + pkt)
+            print("Sent.")
+        finally:
+            dev.close()
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Sync clock on BeQuiet MediaDock keyboard")
+    parser.add_argument("--vid", type=lambda x: int(x, 16), default=None,
+                        help="USB Vendor ID in hex (e.g. 054c)")
+    parser.add_argument("--pid", type=lambda x: int(x, 16), default=None,
+                        help="USB Product ID in hex")
+    parser.add_argument("--path", type=str, default=None,
+                        help="HID device path (e.g. /dev/hidraw0)")
+    parser.add_argument("--session", type=lambda x: int(x, 16), default=0x17,
+                        help="Session ID byte in hex (default: 0x17)")
+    parser.add_argument("--list", action="store_true",
+                        help="List all HID devices and exit")
+    args = parser.parse_args()
+
+    if args.list:
+        for d in hid.enumerate():
+            print(f"  {d['vendor_id']:04x}:{d['product_id']:04x} "
+                  f"usage_page={d.get('usage_page', '?'):#06x} "
+                  f"path={d['path']} "
+                  f"'{d.get('manufacturer_string','')} {d.get('product_string','')}'")
+        raise SystemExit(0)
+
+    if args.path:
+        device_path = args.path.encode()
+    else:
+        dev = find_device(args.vid, args.pid)
+        if not dev:
+            raise SystemExit("Device not found. Use --list to see all HID devices, "
+                             "or specify --vid/--pid/--path manually.")
+        device_path = dev["path"]
+        print(f"Found device: {dev['vendor_id']:04x}:{dev['product_id']:04x} "
+              f"at {device_path}")
+
+    sync_clock(device_path, session_id=args.session)

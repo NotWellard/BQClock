@@ -1,0 +1,5 @@
+[Unit]
+Description=BeQuiet Keyboard Clock Sync
+
+[Service]
+ExecStart=/usr/local/bin/bqclock
