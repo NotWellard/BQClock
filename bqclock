@@ -66,10 +66,12 @@ def local_unix_timestamp() -> int:
       floor(Date.now()/1000 - timezoneOffsetSeconds)
     This is NOT standard UTC Unix time — it's shifted to local wall clock.
     """
-    now = datetime.datetime.now()
+    now = datetime.datetime.now().astimezone()
     utc_ts = int(time.time())
-    offset_seconds = int(now.utcoffset().total_seconds()) if now.utcoffset() else \
-                     -time.timezone  # fallback: use system timezone offset
+    if now.utcoffset():
+        offset_seconds = int(now.utcoffset().total_seconds())
+    else:
+        -time.altzone  # fallback: use system timezone offset, altzone is used instead of timezone to account for daylight savings time
     return utc_ts + offset_seconds
 
 
